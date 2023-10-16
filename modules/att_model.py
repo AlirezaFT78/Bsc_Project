@@ -32,6 +32,12 @@ def pack_wrapper(module, att_feats, att_masks):
     else:
         return module(att_feats)
 
+def embed_mask(seq):
+    seq_mask = (seq.data > 0)
+    seq_mask[:, 0] += True
+    seq_mask = seq_mask.unsqueeze(-2)
+    seq_mask = seq_mask.expand(seq_mask.shape[0],seq_mask.shape[-1],seq_mask.shape[-1])
+    return seq_mask
 
 class AttModel(CaptionModel):
     def __init__(self, args, tokenizer):
@@ -86,13 +92,13 @@ class AttModel(CaptionModel):
         # 'it' contains a word index
         xt = self.embed(it)
 
-        output, state = self.core(xt, fc_feats, att_feats, p_att_feats, state, att_masks)
+        output, state, memory, src_mask = self.core(xt, fc_feats, att_feats, p_att_feats, state, att_masks)
         if output_logsoftmax:
             logprobs = F.log_softmax(self.logit(output), dim=1)
         else:
             logprobs = self.logit(output)
 
-        return logprobs, state
+        return logprobs, state, memory, src_mask
 
     def _sample_beam(self, fc_feats, att_feats, att_masks=None, opt={}):
         beam_size = opt.get('beam_size', 10)
@@ -115,7 +121,7 @@ class AttModel(CaptionModel):
 
         # first step, feed bos
         it = fc_feats.new_full([batch_size], self.bos_idx, dtype=torch.long)
-        logprobs, state = self.get_logprobs_state(it, p_fc_feats, p_att_feats, pp_att_feats, p_att_masks, state)
+        logprobs, state, memory, src_mask = self.get_logprobs_state(it, p_fc_feats, p_att_feats, pp_att_feats, p_att_masks, state)
 
         p_fc_feats, p_att_feats, pp_att_feats, p_att_masks = utils.repeat_tensors(beam_size,
                                                                                   [p_fc_feats, p_att_feats,
@@ -133,7 +139,11 @@ class AttModel(CaptionModel):
                 seq[k, :seq_len] = self.done_beams[k][0]['seq']  # the first beam has highest cumulative score
                 seqLogprobs[k, :seq_len] = self.done_beams[k][0]['logps']
         # return the samples and their log likelihoods
-        return seq, seqLogprobs
+        new_embd = self.sec_tgt_embd(seq)
+        out = self.sec_decoder(new_embd, memory, src_mask, embed_mask(seq))
+        seqLogprobs = F.log_softmax(self.sec_logit(out), dim=-1)
+        new_seq = torch.argmax(seqLogprobs,dim=-1)
+        return new_seq, seq
 
     def _sample(self, fc_feats, att_feats, att_masks=None, update_opts={}):
         opt = self.args.__dict__
